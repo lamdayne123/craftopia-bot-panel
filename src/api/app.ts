@@ -158,6 +158,51 @@ export function createPanelApp(options?: {
     next();
   };
 
+  const SESSION_SECRET =
+    process.env.SESSION_SECRET?.trim() ||
+    process.env.CREDENTIAL_ENCRYPTION_KEY?.trim() ||
+    'craftopia-cafe-default-session-secret';
+
+  const issueSessionToken = (user: Pick<UserRecord, 'id' | 'username' | 'email' | 'role'>): string => {
+    const payload = Buffer.from(
+      JSON.stringify({
+        uid: user.id,
+        un: user.username,
+        em: user.email,
+        rl: user.role,
+        exp: Date.now() + 7 * 24 * 3600 * 1000,
+      }),
+      'utf8'
+    ).toString('base64url');
+    const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+    return `${payload}.${sig}`;
+  };
+
+  const verifySessionToken = (
+    token: string
+  ): { uid: string; un: string; em: string; rl: 'user' | 'admin'; exp: number } | null => {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [payload, sig] = parts;
+    const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    try {
+      const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+        uid: string;
+        un: string;
+        em: string;
+        rl: 'user' | 'admin';
+        exp: number;
+      };
+      if (!parsed.uid || !parsed.exp || parsed.exp <= Date.now()) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
   const requireAuth = async (req: AuthedRequest, res: Response, next: NextFunction) => {
     const rawToken = req.cookies?.[SESSION_COOKIE];
     if (!rawToken || typeof rawToken !== 'string') {
@@ -166,17 +211,41 @@ export function createPanelApp(options?: {
     }
     const tokenHash = sha256(rawToken);
     const session = await db.findValidSession(tokenHash);
-    if (!session) {
+    if (session) {
+      const user = await db.findUserById(session.userId);
+      if (!user) {
+        res.status(401).json({ error: 'Tài khoản không tồn tại.' });
+        return;
+      }
+      const { passwordHash: _p, salt: _s, ...publicUser } = user;
+      req.user = publicUser;
+      req.sessionTokenHash = tokenHash;
+      next();
+      return;
+    }
+
+    // Stateless HMAC fallback for serverless/multi-instance deployments without shared session DB
+    const verified = verifySessionToken(rawToken);
+    if (!verified) {
       res.status(401).json({ error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.' });
       return;
     }
-    const user = await db.findUserById(session.userId);
-    if (!user) {
-      res.status(401).json({ error: 'Tài khoản không tồn tại.' });
-      return;
+    const existing =
+      (await db.findUserById(verified.uid)) ?? (await db.findUserByUsername(verified.un));
+    if (existing) {
+      const { passwordHash: _p, salt: _s, ...publicUser } = existing;
+      req.user = publicUser;
+    } else {
+      const now = new Date().toISOString();
+      req.user = {
+        id: verified.uid,
+        username: verified.un,
+        email: verified.em,
+        role: verified.rl,
+        createdAt: now,
+        updatedAt: now,
+      };
     }
-    const { passwordHash: _p, salt: _s, ...publicUser } = user;
-    req.user = publicUser;
     req.sessionTokenHash = tokenHash;
     next();
   };
@@ -229,7 +298,7 @@ export function createPanelApp(options?: {
       };
       await db.createUser(user);
 
-      const rawToken = crypto.randomBytes(32).toString('hex');
+      const rawToken = issueSessionToken(user);
       await db.createSession({
         id: crypto.randomUUID(),
         userId: user.id,
@@ -255,7 +324,7 @@ export function createPanelApp(options?: {
         res.status(401).json({ error: 'Sai tên đăng nhập hoặc mật khẩu.' });
         return;
       }
-      const rawToken = crypto.randomBytes(32).toString('hex');
+      const rawToken = issueSessionToken(user);
       await db.createSession({
         id: crypto.randomUUID(),
         userId: user.id,
@@ -449,7 +518,7 @@ export function createPanelApp(options?: {
         });
       }
 
-      const rawToken = crypto.randomBytes(32).toString('hex');
+      const rawToken = issueSessionToken(user);
       await db.createSession({
         id: crypto.randomUUID(),
         userId: user.id,
