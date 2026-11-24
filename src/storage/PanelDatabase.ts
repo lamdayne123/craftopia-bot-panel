@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 interface PgClientLike {
@@ -83,7 +84,11 @@ export class PanelDatabase {
   private localData: LocalDbShape | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly dataDir = path.resolve(process.cwd(), 'data')) {
+  constructor(
+    private readonly dataDir = process.env.VERCEL
+      ? path.join(os.tmpdir(), 'craftopia-data')
+      : path.resolve(process.cwd(), 'data')
+  ) {
     this.localFile = path.join(dataDir, 'panel-db.json');
   }
 
