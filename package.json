@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "build:backend": "tsc",
-    "build:frontend": "npm --prefix client run build",
+    "build:frontend": "npm --prefix client install --no-audit --no-fund && npm --prefix client run build",
     "build": "npm run build:backend && npm run build:frontend",
     "start": "node dist/server.js",
     "test": "npm run build:backend && node --test --test-force-exit tests/*.test.js"
