@@ -16,7 +16,7 @@ export class OrchestratorService {
     private readonly realtime: RealtimePublisher,
     options?: { heartbeatTimeoutMs?: number; migrationCooldownMs?: number }
   ) {
-    this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? Number(process.env.WORKER_HEARTBEAT_TIMEOUT_MS || 30000);
+    this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? Number(process.env.WORKER_HEARTBEAT_TIMEOUT_MS || 60000);
     this.migrationCooldownMs = options?.migrationCooldownMs ?? Number(process.env.MIGRATION_COOLDOWN_MS || 60000);
   }
 

@@ -89,6 +89,7 @@ export function createPanelApp(options?: {
 }): PanelAppContext {
   const db = options?.db ?? new PanelDatabase();
   const realtime = options?.realtime ?? new RealtimePublisher();
+  realtime.attachDatabase(db);
   const orchestrator = options?.orchestrator ?? new OrchestratorService(db, realtime);
   const billing = new BillingService(db);
   const localRunner = new LocalBotRunner(db);
@@ -932,7 +933,8 @@ export function createPanelApp(options?: {
   });
 
   app.get('/api/worker/commands', requireWorkerAuth, async (req: Request & { workerId?: string }, res) => {
-    const waitMs = Math.max(0, Math.min(25_000, Number(req.query.waitMs ?? 15_000)));
+    const maxWait = process.env.VERCEL ? 7_500 : 25_000;
+    const waitMs = Math.max(0, Math.min(maxWait, Number(req.query.waitMs ?? 7_000)));
     const commands = await realtime.drainCommands(req.workerId!, waitMs);
     res.json({ commands });
   });

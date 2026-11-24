@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import type { PanelDatabase } from '../storage/PanelDatabase';
 
 export interface RealtimeEnvelope {
   v: 1;
@@ -21,8 +22,8 @@ export type RealtimeDispatchHook = (envelope: RealtimeEnvelope) => Promise<void>
 
 /**
  * Stateless publisher + low-latency per-worker command queue for direct Panel-linked Workers.
- * Publishes commands to Supabase Realtime Broadcast REST API when configured,
- * and buffers/wakes long-polling workers via /api/worker/commands.
+ * Uses PostgreSQL queue when connected (for multi-instance Vercel serverless) and in-memory
+ * instant wakeup for standalone Node servers.
  */
 export class RealtimePublisher {
   private readonly supabaseUrl = process.env.SUPABASE_URL?.replace(/\/+$/, '');
@@ -31,14 +32,19 @@ export class RealtimePublisher {
   public readonly published: RealtimeEnvelope[] = [];
   private readonly workerQueues = new Map<string, RealtimeEnvelope[]>();
   private readonly waiters = new Map<string, Array<(items: RealtimeEnvelope[]) => void>>();
+  private db: PanelDatabase | null = null;
 
   constructor(private readonly localHook?: RealtimeDispatchHook) {}
+
+  public attachDatabase(db: PanelDatabase): void {
+    this.db = db;
+  }
 
   public isManagedConfigured(): boolean {
     return Boolean(this.supabaseUrl && this.serviceKey);
   }
 
-  private enqueueForWorker(envelope: RealtimeEnvelope): void {
+  private enqueueLocal(envelope: RealtimeEnvelope): void {
     const wid = envelope.workerId;
     if (!wid) return;
     const queue = this.workerQueues.get(wid) ?? [];
@@ -57,7 +63,18 @@ export class RealtimePublisher {
     }
   }
 
-  public async drainCommands(workerId: string, waitMs = 15_000): Promise<RealtimeEnvelope[]> {
+  public async drainCommands(workerId: string, waitMs = 7_000): Promise<RealtimeEnvelope[]> {
+    if (this.db?.isPostgres()) {
+      const deadline = Date.now() + Math.max(0, Math.min(8_000, waitMs));
+      while (true) {
+        const items = await this.db.popWorkerCommands<RealtimeEnvelope>(workerId);
+        if (items.length > 0 || Date.now() >= deadline) {
+          return items;
+        }
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+
     const existing = this.workerQueues.get(workerId);
     if (existing && existing.length > 0) {
       this.workerQueues.set(workerId, []);
@@ -102,7 +119,12 @@ export class RealtimePublisher {
     };
     this.published.push(envelope);
     if (this.published.length > 200) this.published.shift();
-    this.enqueueForWorker(envelope);
+
+    if (this.db?.isPostgres()) {
+      await this.db.enqueueWorkerCommand(envelope.requestId, envelope.workerId, envelope);
+    } else {
+      this.enqueueLocal(envelope);
+    }
 
     if (this.localHook) {
       await this.localHook(envelope);
