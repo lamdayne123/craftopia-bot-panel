@@ -219,7 +219,7 @@ export class PanelDatabase {
         port INTEGER NOT NULL DEFAULT 25565,
         version TEXT NOT NULL DEFAULT '1.21.4',
         auth_mode TEXT NOT NULL DEFAULT 'offline',
-        worker_id TEXT REFERENCES workers(id) ON DELETE SET NULL,
+        worker_id TEXT,
         status TEXT NOT NULL DEFAULT 'STOPPED',
         uptime_ms BIGINT NOT NULL DEFAULT 0,
         last_connected_at TIMESTAMPTZ,
@@ -231,6 +231,7 @@ export class PanelDatabase {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      ALTER TABLE bots DROP CONSTRAINT IF EXISTS bots_worker_id_fkey;
 
       CREATE TABLE IF NOT EXISTS bot_credentials (
         bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,

@@ -215,7 +215,7 @@ export default function App() {
   const handleCreateBot = async () => {
     setBusyIds((p) => ({ ...p, create: true }));
     try {
-      await api('/api/bots', {
+      const created = await api<{ bot: BotItem }>('/api/bots', {
         method: 'POST',
         body: JSON.stringify({
           idempotencyKey: wizard.idempotencyKey,
@@ -237,6 +237,9 @@ export default function App() {
           },
         }),
       });
+      if (created?.bot) {
+        setBots((prev) => [created.bot, ...prev.filter((b) => b.id !== created.bot.id)]);
+      }
       notify('ok', 'Đã tạo bot Java và điều phối tới Worker!');
       setWizardStep(1);
       setWizard((w) => ({
