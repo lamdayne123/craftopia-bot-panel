@@ -3,11 +3,36 @@ import { LOCAL_PANEL_WORKER_ID } from './services/LocalBotRunner';
 import { ensureAdminAccount } from './utils/bootstrap';
 
 const NODE_PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const ctx = createPanelApp();
+let initPromise: Promise<void> | null = null;
+
+async function ensureReady(): Promise<void> {
+  if (!initPromise) {
+    initPromise = (async () => {
+      await ctx.db.init();
+      await ensureAdminAccount(ctx.db);
+    })();
+  }
+  await initPromise;
+}
+
+// Vercel serverless entrypoint compatibility (if Vercel uses dist/server.js as root entrypoint)
+export default async function handler(req: any, res: any) {
+  try {
+    await ensureReady();
+    return ctx.app(req, res);
+  } catch (err) {
+    initPromise = null;
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[Server Handler Error]', message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: `Server initialization failed: ${message}` });
+    }
+  }
+}
 
 async function main() {
-  const ctx = createPanelApp();
-  await ctx.db.init();
-  await ensureAdminAccount(ctx.db);
+  await ensureReady();
 
   // Auto-restart local-panel-core bots that were active before hosting/panel restart
   setTimeout(() => {
@@ -44,4 +69,6 @@ async function main() {
   });
 }
 
-void main();
+if (!process.env.VERCEL) {
+  void main();
+}

@@ -980,8 +980,12 @@ export function createPanelApp(options?: {
   });
 
   // Serve built frontend in standalone mode (Vercel serves client/dist directly via CDN)
-  const clientDist = path.resolve(process.cwd(), 'client', 'dist');
-  if (fs.existsSync(clientDist)) {
+  const clientDistCandidates = [
+    path.resolve(process.cwd(), 'client', 'dist'),
+    path.resolve(__dirname, '..', '..', 'client', 'dist'),
+  ];
+  const clientDist = clientDistCandidates.find((p) => fs.existsSync(p));
+  if (clientDist) {
     app.use(express.static(clientDist));
     app.get(/^(?!\/api\/).*/, (_req, res) => {
       res.sendFile(path.join(clientDist, 'index.html'));
