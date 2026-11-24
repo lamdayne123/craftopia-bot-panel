@@ -609,6 +609,7 @@ export function createPanelApp(options?: {
       connectingBots: bots.filter((b) => ['QUEUED', 'CONNECTING', 'AUTHENTICATING', 'RECONNECTING'].includes(b.status)).length,
       offlineBots: bots.filter((b) => b.status === 'STOPPED').length,
       errorBots: bots.filter((b) => b.status === 'ERROR').length,
+      bots,
       quota,
       realtimeConnected: realtime.isManagedConfigured() || healthyWorkers > 0,
       healthyWorkers,

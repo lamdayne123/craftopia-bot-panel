@@ -134,6 +134,7 @@ export interface OverviewData {
   connectingBots: number;
   offlineBots: number;
   errorBots: number;
+  bots?: BotItem[];
   realtimeConnected: boolean;
   healthyWorkers: number;
   recentActivity: AuditLogItem[];

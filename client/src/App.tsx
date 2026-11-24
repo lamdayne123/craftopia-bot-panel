@@ -116,7 +116,8 @@ export default function App() {
       ]);
       setQuota(meRes.quota);
       setOverview(ovRes);
-      setBots(botsRes.bots);
+      const ovBots = ovRes.bots ?? [];
+      setBots(botsRes.bots.length >= ovBots.length ? botsRes.bots : ovBots);
       setPlans(plansRes.plans);
 
       if (currUser.role === 'admin') {
