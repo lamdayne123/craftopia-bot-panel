@@ -20,10 +20,56 @@ export class OrchestratorService {
     this.migrationCooldownMs = options?.migrationCooldownMs ?? Number(process.env.MIGRATION_COOLDOWN_MS || 60000);
   }
 
+  private getWorkerSigningSecret(): string {
+    return (
+      process.env.SESSION_SECRET?.trim() ||
+      process.env.CREDENTIAL_ENCRYPTION_KEY?.trim() ||
+      'craftopia-cafe-default-session-secret'
+    );
+  }
+
+  private signWorkerToken(workerId: string, name: string, maxBots: number): string {
+    const payload = Buffer.from(
+      JSON.stringify({ id: workerId, name, maxBots, nonce: crypto.randomBytes(8).toString('hex') }),
+      'utf8'
+    ).toString('base64url');
+    const sig = crypto.createHmac('sha256', this.getWorkerSigningSecret()).update(payload).digest('base64url');
+    return `wk2_${payload}.${sig}`;
+  }
+
+  private verifySignedWorkerToken(
+    rawToken: string
+  ): { id: string; name: string; maxBots: number } | null {
+    if (!rawToken.startsWith('wk2_')) return null;
+    const body = rawToken.slice(4);
+    const parts = body.split('.');
+    if (parts.length !== 2) return null;
+    const [payload, sig] = parts;
+    const expected = crypto
+      .createHmac('sha256', this.getWorkerSigningSecret())
+      .update(payload)
+      .digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    try {
+      const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+        id: string;
+        name: string;
+        maxBots: number;
+      };
+      if (!parsed.id) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
   public async createWorker(name: string, maxBots: number): Promise<{ worker: WorkerRecord; rawToken: string }> {
-    const rawToken = `wk_${crypto.randomBytes(24).toString('hex')}`;
+    const id = `worker-${crypto.randomUUID().slice(0, 8)}`;
+    const rawToken = this.signWorkerToken(id, name.trim(), maxBots);
     const worker: WorkerRecord = {
-      id: `worker-${crypto.randomUUID().slice(0, 8)}`,
+      id,
       name: name.trim(),
       tokenHash: sha256(rawToken),
       version: '1.0.0',
@@ -44,9 +90,37 @@ export class OrchestratorService {
 
   public async authenticateWorker(workerId: string, rawToken: string): Promise<WorkerRecord | null> {
     const w = await this.db.getWorker(workerId);
-    if (!w || w.revokedAt) return null;
-    if (w.tokenHash !== sha256(rawToken)) return null;
-    return w;
+    if (w) {
+      if (w.revokedAt) return null;
+      if (w.tokenHash !== sha256(rawToken)) return null;
+      return w;
+    }
+
+    // Stateless fallback when serverless /tmp doesn't share worker rows across instances
+    if (!this.db.isPostgres()) {
+      const signed = this.verifySignedWorkerToken(rawToken);
+      if (signed && signed.id === workerId) {
+        const hydrated: WorkerRecord = {
+          id: signed.id,
+          name: signed.name || workerId,
+          tokenHash: sha256(rawToken),
+          version: '1.0.0',
+          status: 'OFFLINE',
+          maxBots: Number(signed.maxBots || 4),
+          activeBots: 0,
+          rssMb: 0,
+          heapMb: 0,
+          eventLoopLagMs: 0,
+          lastError: null,
+          lastHeartbeatAt: null,
+          revokedAt: null,
+          createdAt: new Date().toISOString(),
+        };
+        await this.db.upsertWorker(hydrated);
+        return hydrated;
+      }
+    }
+    return null;
   }
 
   public async rotateWorkerToken(workerId: string, actorId: string): Promise<{ worker: WorkerRecord; rawToken: string }> {
