@@ -72,6 +72,7 @@ const createBotSchema = zod_1.z.object({
 function createPanelApp(options) {
     const db = options?.db ?? new PanelDatabase_1.PanelDatabase();
     const realtime = options?.realtime ?? new RealtimePublisher_1.RealtimePublisher();
+    realtime.attachDatabase(db);
     const orchestrator = options?.orchestrator ?? new OrchestratorService_1.OrchestratorService(db, realtime);
     const billing = new BillingService_1.BillingService(db);
     const localRunner = new LocalBotRunner_1.LocalBotRunner(db);
@@ -127,6 +128,40 @@ function createPanelApp(options) {
         }
         next();
     };
+    const SESSION_SECRET = process.env.SESSION_SECRET?.trim() ||
+        process.env.CREDENTIAL_ENCRYPTION_KEY?.trim() ||
+        'craftopia-cafe-default-session-secret';
+    const issueSessionToken = (user) => {
+        const payload = Buffer.from(JSON.stringify({
+            uid: user.id,
+            un: user.username,
+            em: user.email,
+            rl: user.role,
+            exp: Date.now() + 7 * 24 * 3600 * 1000,
+        }), 'utf8').toString('base64url');
+        const sig = node_crypto_1.default.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+        return `${payload}.${sig}`;
+    };
+    const verifySessionToken = (token) => {
+        const parts = token.split('.');
+        if (parts.length !== 2)
+            return null;
+        const [payload, sig] = parts;
+        const expected = node_crypto_1.default.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+        const a = Buffer.from(sig);
+        const b = Buffer.from(expected);
+        if (a.length !== b.length || !node_crypto_1.default.timingSafeEqual(a, b))
+            return null;
+        try {
+            const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+            if (!parsed.uid || !parsed.exp || parsed.exp <= Date.now())
+                return null;
+            return parsed;
+        }
+        catch {
+            return null;
+        }
+    };
     const requireAuth = async (req, res, next) => {
         const rawToken = req.cookies?.[exports.SESSION_COOKIE];
         if (!rawToken || typeof rawToken !== 'string') {
@@ -135,17 +170,40 @@ function createPanelApp(options) {
         }
         const tokenHash = (0, crypto_1.sha256)(rawToken);
         const session = await db.findValidSession(tokenHash);
-        if (!session) {
+        if (session) {
+            const user = await db.findUserById(session.userId);
+            if (!user) {
+                res.status(401).json({ error: 'Tài khoản không tồn tại.' });
+                return;
+            }
+            const { passwordHash: _p, salt: _s, ...publicUser } = user;
+            req.user = publicUser;
+            req.sessionTokenHash = tokenHash;
+            next();
+            return;
+        }
+        // Stateless HMAC fallback for serverless/multi-instance deployments without shared session DB
+        const verified = verifySessionToken(rawToken);
+        if (!verified) {
             res.status(401).json({ error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.' });
             return;
         }
-        const user = await db.findUserById(session.userId);
-        if (!user) {
-            res.status(401).json({ error: 'Tài khoản không tồn tại.' });
-            return;
+        const existing = (await db.findUserById(verified.uid)) ?? (await db.findUserByUsername(verified.un));
+        if (existing) {
+            const { passwordHash: _p, salt: _s, ...publicUser } = existing;
+            req.user = publicUser;
         }
-        const { passwordHash: _p, salt: _s, ...publicUser } = user;
-        req.user = publicUser;
+        else {
+            const now = new Date().toISOString();
+            req.user = {
+                id: verified.uid,
+                username: verified.un,
+                email: verified.em,
+                role: verified.rl,
+                createdAt: now,
+                updatedAt: now,
+            };
+        }
         req.sessionTokenHash = tokenHash;
         next();
     };
@@ -193,7 +251,7 @@ function createPanelApp(options) {
                 updatedAt: now,
             };
             await db.createUser(user);
-            const rawToken = node_crypto_1.default.randomBytes(32).toString('hex');
+            const rawToken = issueSessionToken(user);
             await db.createSession({
                 id: node_crypto_1.default.randomUUID(),
                 userId: user.id,
@@ -219,7 +277,7 @@ function createPanelApp(options) {
                 res.status(401).json({ error: 'Sai tên đăng nhập hoặc mật khẩu.' });
                 return;
             }
-            const rawToken = node_crypto_1.default.randomBytes(32).toString('hex');
+            const rawToken = issueSessionToken(user);
             await db.createSession({
                 id: node_crypto_1.default.randomUUID(),
                 userId: user.id,
@@ -393,7 +451,7 @@ function createPanelApp(options) {
                     ...(user.displayName ? {} : dUser.global_name ? { displayName: dUser.global_name } : {}),
                 });
             }
-            const rawToken = node_crypto_1.default.randomBytes(32).toString('hex');
+            const rawToken = issueSessionToken(user);
             await db.createSession({
                 id: node_crypto_1.default.randomUUID(),
                 userId: user.id,
@@ -476,6 +534,7 @@ function createPanelApp(options) {
             connectingBots: bots.filter((b) => ['QUEUED', 'CONNECTING', 'AUTHENTICATING', 'RECONNECTING'].includes(b.status)).length,
             offlineBots: bots.filter((b) => b.status === 'STOPPED').length,
             errorBots: bots.filter((b) => b.status === 'ERROR').length,
+            bots,
             quota,
             realtimeConnected: realtime.isManagedConfigured() || healthyWorkers > 0,
             healthyWorkers,
@@ -786,7 +845,8 @@ function createPanelApp(options) {
         res.json({ ok: true, worker: updated });
     });
     app.get('/api/worker/commands', requireWorkerAuth, async (req, res) => {
-        const waitMs = Math.max(0, Math.min(25_000, Number(req.query.waitMs ?? 15_000)));
+        const maxWait = process.env.VERCEL ? 7_500 : 25_000;
+        const waitMs = Math.max(0, Math.min(maxWait, Number(req.query.waitMs ?? 7_000)));
         const commands = await realtime.drainCommands(req.workerId, waitMs);
         res.json({ commands });
     });
@@ -894,8 +954,12 @@ function createPanelApp(options) {
         });
     });
     // Serve built frontend in standalone mode (Vercel serves client/dist directly via CDN)
-    const clientDist = node_path_1.default.resolve(process.cwd(), 'client', 'dist');
-    if (node_fs_1.default.existsSync(clientDist)) {
+    const clientDistCandidates = [
+        node_path_1.default.resolve(process.cwd(), 'client', 'dist'),
+        node_path_1.default.resolve(__dirname, '..', '..', 'client', 'dist'),
+    ];
+    const clientDist = clientDistCandidates.find((p) => node_fs_1.default.existsSync(p));
+    if (clientDist) {
         app.use(express_1.default.static(clientDist));
         app.get(/^(?!\/api\/).*/, (_req, res) => {
             res.sendFile(node_path_1.default.join(clientDist, 'index.html'));

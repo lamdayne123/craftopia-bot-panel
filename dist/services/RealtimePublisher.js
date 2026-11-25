@@ -7,8 +7,8 @@ exports.RealtimePublisher = void 0;
 const node_crypto_1 = __importDefault(require("node:crypto"));
 /**
  * Stateless publisher + low-latency per-worker command queue for direct Panel-linked Workers.
- * Publishes commands to Supabase Realtime Broadcast REST API when configured,
- * and buffers/wakes long-polling workers via /api/worker/commands.
+ * Uses PostgreSQL queue when connected (for multi-instance Vercel serverless) and in-memory
+ * instant wakeup for standalone Node servers.
  */
 class RealtimePublisher {
     localHook;
@@ -18,13 +18,17 @@ class RealtimePublisher {
     published = [];
     workerQueues = new Map();
     waiters = new Map();
+    db = null;
     constructor(localHook) {
         this.localHook = localHook;
+    }
+    attachDatabase(db) {
+        this.db = db;
     }
     isManagedConfigured() {
         return Boolean(this.supabaseUrl && this.serviceKey);
     }
-    enqueueForWorker(envelope) {
+    enqueueLocal(envelope) {
         const wid = envelope.workerId;
         if (!wid)
             return;
@@ -43,7 +47,17 @@ class RealtimePublisher {
             }
         }
     }
-    async drainCommands(workerId, waitMs = 15_000) {
+    async drainCommands(workerId, waitMs = 7_000) {
+        if (this.db?.isPostgres()) {
+            const deadline = Date.now() + Math.max(0, Math.min(8_000, waitMs));
+            while (true) {
+                const items = await this.db.popWorkerCommands(workerId);
+                if (items.length > 0 || Date.now() >= deadline) {
+                    return items;
+                }
+                await new Promise((r) => setTimeout(r, 400));
+            }
+        }
         const existing = this.workerQueues.get(workerId);
         if (existing && existing.length > 0) {
             this.workerQueues.set(workerId, []);
@@ -86,7 +100,12 @@ class RealtimePublisher {
         this.published.push(envelope);
         if (this.published.length > 200)
             this.published.shift();
-        this.enqueueForWorker(envelope);
+        if (this.db?.isPostgres()) {
+            await this.db.enqueueWorkerCommand(envelope.requestId, envelope.workerId, envelope);
+        }
+        else {
+            this.enqueueLocal(envelope);
+        }
         if (this.localHook) {
             await this.localHook(envelope);
             return { requestId: envelope.requestId, delivered: true };

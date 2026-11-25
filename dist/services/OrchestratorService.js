@@ -17,13 +17,50 @@ class OrchestratorService {
     constructor(db, realtime, options) {
         this.db = db;
         this.realtime = realtime;
-        this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? Number(process.env.WORKER_HEARTBEAT_TIMEOUT_MS || 30000);
+        this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? Number(process.env.WORKER_HEARTBEAT_TIMEOUT_MS || 60000);
         this.migrationCooldownMs = options?.migrationCooldownMs ?? Number(process.env.MIGRATION_COOLDOWN_MS || 60000);
     }
+    getWorkerSigningSecret() {
+        return (process.env.SESSION_SECRET?.trim() ||
+            process.env.CREDENTIAL_ENCRYPTION_KEY?.trim() ||
+            'craftopia-cafe-default-session-secret');
+    }
+    signWorkerToken(workerId, name, maxBots) {
+        const payload = Buffer.from(JSON.stringify({ id: workerId, name, maxBots, nonce: node_crypto_1.default.randomBytes(8).toString('hex') }), 'utf8').toString('base64url');
+        const sig = node_crypto_1.default.createHmac('sha256', this.getWorkerSigningSecret()).update(payload).digest('base64url');
+        return `wk2_${payload}.${sig}`;
+    }
+    verifySignedWorkerToken(rawToken) {
+        if (!rawToken.startsWith('wk2_'))
+            return null;
+        const body = rawToken.slice(4);
+        const parts = body.split('.');
+        if (parts.length !== 2)
+            return null;
+        const [payload, sig] = parts;
+        const expected = node_crypto_1.default
+            .createHmac('sha256', this.getWorkerSigningSecret())
+            .update(payload)
+            .digest('base64url');
+        const a = Buffer.from(sig);
+        const b = Buffer.from(expected);
+        if (a.length !== b.length || !node_crypto_1.default.timingSafeEqual(a, b))
+            return null;
+        try {
+            const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+            if (!parsed.id)
+                return null;
+            return parsed;
+        }
+        catch {
+            return null;
+        }
+    }
     async createWorker(name, maxBots) {
-        const rawToken = `wk_${node_crypto_1.default.randomBytes(24).toString('hex')}`;
+        const id = `worker-${node_crypto_1.default.randomUUID().slice(0, 8)}`;
+        const rawToken = this.signWorkerToken(id, name.trim(), maxBots);
         const worker = {
-            id: `worker-${node_crypto_1.default.randomUUID().slice(0, 8)}`,
+            id,
             name: name.trim(),
             tokenHash: (0, crypto_1.sha256)(rawToken),
             version: '1.0.0',
@@ -43,11 +80,38 @@ class OrchestratorService {
     }
     async authenticateWorker(workerId, rawToken) {
         const w = await this.db.getWorker(workerId);
-        if (!w || w.revokedAt)
-            return null;
-        if (w.tokenHash !== (0, crypto_1.sha256)(rawToken))
-            return null;
-        return w;
+        if (w) {
+            if (w.revokedAt)
+                return null;
+            if (w.tokenHash !== (0, crypto_1.sha256)(rawToken))
+                return null;
+            return w;
+        }
+        // Stateless fallback when serverless /tmp doesn't share worker rows across instances
+        if (!this.db.isPostgres()) {
+            const signed = this.verifySignedWorkerToken(rawToken);
+            if (signed && signed.id === workerId) {
+                const hydrated = {
+                    id: signed.id,
+                    name: signed.name || workerId,
+                    tokenHash: (0, crypto_1.sha256)(rawToken),
+                    version: '1.0.0',
+                    status: 'OFFLINE',
+                    maxBots: Number(signed.maxBots || 4),
+                    activeBots: 0,
+                    rssMb: 0,
+                    heapMb: 0,
+                    eventLoopLagMs: 0,
+                    lastError: null,
+                    lastHeartbeatAt: null,
+                    revokedAt: null,
+                    createdAt: new Date().toISOString(),
+                };
+                await this.db.upsertWorker(hydrated);
+                return hydrated;
+            }
+        }
+        return null;
     }
     async rotateWorkerToken(workerId, actorId) {
         const w = await this.db.getWorker(workerId);

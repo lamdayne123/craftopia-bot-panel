@@ -1,13 +1,38 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.default = handler;
 const app_1 = require("./api/app");
 const LocalBotRunner_1 = require("./services/LocalBotRunner");
 const bootstrap_1 = require("./utils/bootstrap");
 const NODE_PING_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const ctx = (0, app_1.createPanelApp)();
+let initPromise = null;
+async function ensureReady() {
+    if (!initPromise) {
+        initPromise = (async () => {
+            await ctx.db.init();
+            await (0, bootstrap_1.ensureAdminAccount)(ctx.db);
+        })();
+    }
+    await initPromise;
+}
+// Vercel serverless entrypoint compatibility (if Vercel uses dist/server.js as root entrypoint)
+async function handler(req, res) {
+    try {
+        await ensureReady();
+        return ctx.app(req, res);
+    }
+    catch (err) {
+        initPromise = null;
+        const message = err instanceof Error ? err.message : String(err);
+        console.error('[Server Handler Error]', message);
+        if (!res.headersSent) {
+            res.status(500).json({ error: `Server initialization failed: ${message}` });
+        }
+    }
+}
 async function main() {
-    const ctx = (0, app_1.createPanelApp)();
-    await ctx.db.init();
-    await (0, bootstrap_1.ensureAdminAccount)(ctx.db);
+    await ensureReady();
     // Auto-restart local-panel-core bots that were active before hosting/panel restart
     setTimeout(() => {
         void (async () => {
@@ -36,4 +61,6 @@ async function main() {
         console.log(`[Craftopia SaaS Panel] Listening on http://localhost:${port}`);
     });
 }
-void main();
+if (!process.env.VERCEL) {
+    void main();
+}
